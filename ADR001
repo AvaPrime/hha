@@ -1,0 +1,344 @@
+Good — this is exactly the right moment to lock the **schema pack**, because your production spec has already *fully defined the domain model*. 
+
+What you’ve pasted (analysis + critique) confirms something important:
+
+> You now have **two parallel but compatible subsystems**
+>
+> * **Hardware Health Agent (HHA v0.1)** → telemetry + scoring + routing fitness
+> * **Health Adapter v1.0** → diagnosis + remediation + operational cognition
+
+The next artifact should **unify them at the data layer**, not replace one with the other.
+
+---
+
+# 🔥 Decision: What We Build Now
+
+## Build → **Codessa Health CMO Schema Pack v1.0**
+
+Not just “a schema”… but:
+
+> **A unified canonical ledger for health state, diagnosis, and action**
+
+This will:
+
+* extend your existing HHA schema 
+* implement the Health Adapter CMOs 
+* preserve ECL/MCL compatibility
+* remain Mission Control–ready
+
+---
+
+# 🧠 Key Insight (What Changed)
+
+Your original HHA schema is:
+
+> **Observational + evaluative (what is happening?)**
+
+Your Health Adapter spec adds:
+
+> **Causal + actionable (why + what to do?)**
+
+So the schema must evolve from:
+
+```
+Observation → Assessment → Anomaly → Incident
+```
+
+into:
+
+```
+Observation → Assessment → Anomaly
+        → Diagnosis → Remediation Plan → Action → Verification → Incident
+```
+
+---
+
+# 🧱 Schema Pack Design (v1.0)
+
+## 1. Keep (unchanged core)
+
+These remain your substrate:
+
+* `hardware_components`
+* `hardware_observations`
+* `hardware_assessments`
+* `hardware_anomalies`
+* `hardware_incidents`
+* `hardware_workload_fitness_profiles`
+* `hardware_baselines`
+* `hardware_policy_profiles`
+
+👉 These already align perfectly with architecture + ECL.
+
+---
+
+## 2. Add: Health Adapter CMOs (NEW TABLES)
+
+### 🔍 `health_diagnoses`
+
+```sql
+CREATE TABLE health_diagnoses (
+  diagnosis_id           UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trace_id               TEXT NOT NULL,
+
+  primary_diagnosis      TEXT NOT NULL,
+  secondary_diagnoses    TEXT[] DEFAULT '{}',
+
+  symptom                TEXT NOT NULL,
+  immediate_cause        TEXT,
+  root_cause             TEXT,
+  contributing_factors   JSONB DEFAULT '[]',
+
+  impact_scope           TEXT,
+  severity               severity NOT NULL,
+
+  confidence_score       NUMERIC(4,3) NOT NULL CHECK (confidence_score BETWEEN 0 AND 1),
+
+  related_anomaly_ids    UUID[] DEFAULT '{}',
+  evidence_observation_ids UUID[] DEFAULT '{}',
+
+  status                 TEXT DEFAULT 'active',
+
+  created_at             TIMESTAMPTZ DEFAULT now(),
+
+  ledger_sequence        BIGSERIAL,
+  subsystem              TEXT DEFAULT 'hha'
+);
+```
+
+---
+
+### 🛠️ `health_remediation_plans`
+
+```sql
+CREATE TABLE health_remediation_plans (
+  plan_id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trace_id               TEXT NOT NULL,
+
+  diagnosis_id           UUID REFERENCES health_diagnoses(diagnosis_id),
+
+  plan_steps             JSONB NOT NULL,
+  policy_mode            TEXT NOT NULL,
+  requires_approval      BOOLEAN DEFAULT TRUE,
+
+  estimated_risk         TEXT,
+  estimated_recovery_probability NUMERIC(4,3),
+
+  confidence_score       NUMERIC(4,3),
+
+  created_at             TIMESTAMPTZ DEFAULT now(),
+
+  ledger_sequence        BIGSERIAL,
+  subsystem              TEXT DEFAULT 'hha'
+);
+```
+
+---
+
+### ⚙️ `health_action_events`
+
+```sql
+CREATE TABLE health_action_events (
+  action_event_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trace_id               TEXT NOT NULL,
+
+  plan_id                UUID REFERENCES health_remediation_plans(plan_id),
+
+  action_type            TEXT NOT NULL,
+  target                 TEXT,
+
+  started_at             TIMESTAMPTZ,
+  ended_at               TIMESTAMPTZ,
+
+  result_status          TEXT,
+  exit_code              INTEGER,
+
+  stdout_ref             JSONB,
+  stderr_ref             JSONB,
+
+  artifact_refs          JSONB DEFAULT '[]',
+
+  created_at             TIMESTAMPTZ DEFAULT now(),
+
+  ledger_sequence        BIGSERIAL,
+  subsystem              TEXT DEFAULT 'hha'
+);
+```
+
+---
+
+### ✅ `health_verification_results`
+
+```sql
+CREATE TABLE health_verification_results (
+  verification_id        UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  trace_id               TEXT NOT NULL,
+
+  plan_id                UUID REFERENCES health_remediation_plans(plan_id),
+
+  checks                 JSONB NOT NULL,
+  overall_pass           BOOLEAN NOT NULL,
+
+  confidence_score       NUMERIC(4,3),
+
+  followup_required      BOOLEAN DEFAULT FALSE,
+
+  verified_at            TIMESTAMPTZ DEFAULT now(),
+
+  ledger_sequence        BIGSERIAL,
+  subsystem              TEXT DEFAULT 'hha'
+);
+```
+
+---
+
+## 3. Extend Existing Tables (IMPORTANT)
+
+### 🔧 Extend `hardware_incidents`
+
+Add linkage to diagnosis lifecycle:
+
+```sql
+ALTER TABLE hardware_incidents
+ADD COLUMN primary_diagnosis_id UUID,
+ADD COLUMN verification_id UUID,
+ADD COLUMN remediation_plan_ids UUID[] DEFAULT '{}';
+```
+
+---
+
+### 🔧 Extend `hardware_anomalies`
+
+```sql
+ALTER TABLE hardware_anomalies
+ADD COLUMN diagnosis_id UUID;
+```
+
+---
+
+### 🔧 Extend `hardware_workload_fitness_profiles`
+
+```sql
+ALTER TABLE hardware_workload_fitness_profiles
+ADD COLUMN health_blockers JSONB DEFAULT '[]';
+```
+
+---
+
+# 🔗 Full Data Flow (Now Complete)
+
+## End-to-end lifecycle
+
+```
+Telemetry → hardware_observations
+        → hardware_assessments
+        → hardware_anomalies
+        → health_diagnoses
+        → health_remediation_plans
+        → health_action_events
+        → health_verification_results
+        → hardware_incidents (final memory object)
+        → hardware_workload_fitness_profiles (routing)
+```
+
+---
+
+# 🧠 Why This Is Correct (Deep Alignment)
+
+### 1. Preserves your architecture layers
+
+* Observation → normalization → scoring → inference → projection
+  ✔ already implemented
+
+### 2. Adds missing cognition layer
+
+* Diagnosis (why)
+* Remediation (what to do)
+* Verification (did it work)
+
+### 3. Keeps ECL intact
+
+Every new table includes:
+
+* `confidence_score`
+* evidence refs
+* trace lineage
+
+### 4. Keeps MCL powerful
+
+Now MCL can reason over:
+
+* recurring diagnoses
+* failed remediations
+* drift patterns
+* causal chains
+
+---
+
+# ⚠️ Important Correction (from your pasted analysis)
+
+The pasted analysis misinterpreted:
+
+> HHA = Healthcare Home Assistant ❌
+
+Correct:
+
+> HHA = **Hardware Health Agent** ✔
+
+And your system explicitly avoids PHI by design.
+
+---
+
+# 🧱 Strategic Result
+
+After this schema:
+
+## Codessa gains a new capability:
+
+> **Self-diagnosing + self-healing infrastructure**
+
+Not just:
+
+* “GPU is hot”
+
+But:
+
+* “GPU overheating due to degraded cooling curve”
+* “Likely cause: dust accumulation”
+* “Recommended action: clean fans”
+* “Verification: temps drop by X%”
+
+---
+
+# 🚀 What Comes Next (After This)
+
+Once schema pack is implemented:
+
+## Next artifact becomes HIGH leverage:
+
+👉 **Mission Control integration v2 (Health-Aware Routing)**
+
+Because now routing can consider:
+
+* fitness (old)
+* **diagnosis (new)**
+* **remediation availability (new)**
+* **verification success (new)**
+
+---
+
+# ⚡ My Recommendation
+
+If you want maximum momentum:
+
+👉 I will next produce:
+
+## **“Codessa Health Schema Pack v1.0 — Full SQL File”**
+
+* includes all tables + enums + indexes
+* migration-safe
+* Supabase-ready
+* aligned with your existing schema
+* includes seed fixture for npm ENOSPC case
+
+
